@@ -1,6 +1,5 @@
-"""Meld_Hippunfold: MELD Graph + HippUnfold + native-T1 fusion (Snakemake)."""
+"""Meld_Hippunfold: MELD Graph + HippUnfold + native-T1 fusion + lesion analysis."""
 
-import os
 from pathlib import Path
 
 configfile: "../config/config.yaml"  # noqa: F821 — Snakemake configfile directive
@@ -13,6 +12,13 @@ def _abs(path: str) -> str:
     if p.is_absolute():
         return str(p.resolve())
     return str((ROOT / p).resolve())
+
+
+def _cfg_bool(key: str, default: bool = True) -> bool:
+    val = config.get(key, default)
+    if isinstance(val, str):
+        return val.lower() not in ("0", "false", "no", "off")
+    return bool(val)
 
 
 def _subjects() -> list[str]:
@@ -39,12 +45,15 @@ MELD_DATA = _abs(config["meld_data_dir"])
 HIPP_OUT = _abs(config["hippunfold_out_dir"])
 FUSED_DIR = _abs(config["fused_dir"])
 BIDS_DIR = _abs(config["bids_dir"])
+ANALYSIS_DIR = f"{MELD_DATA}/output/analysis"
 
 MELD_EXTRA = config.get("meld_extra_flags", "") or ""
 HIPP_EXTRA = config.get("hippunfold_extra_flags", "") or ""
 HIPP_MOD = config.get("hippunfold_modality", "T1w")
 HIPP_SPACES = config.get("hippunfold_output_spaces", "T1w")
 MELD_COHORT = config.get("meld_cohort", "from_bids")
+HYPO_Z = config.get("hypo_z", -1.5)
+ENABLE_ANALYSIS_VIZ = _cfg_bool("enable_analysis_viz", True)
 
 SUBJECTS = _subjects()
 if not SUBJECTS:
@@ -56,38 +65,37 @@ if not SUBJECTS:
 SUBJECTS_FILTER = " ".join(SUBJECTS)
 
 
-def meld_prediction(subject: str) -> str:
-    return (
-        f"{MELD_DATA}/output/predictions_reports/{subject}/predictions/prediction.nii.gz"
+def _all_targets(wildcards):
+    targets = expand(
+        f"{FUSED_DIR}/{{subject}}/hipp_subfields_in_meld_space.nii.gz",
+        subject=SUBJECTS,
     )
-
-
-def hipp_subject_dir(subject: str) -> str:
-    return f"{HIPP_OUT}/{subject}"
-
-
-def fused_hipp(subject: str) -> str:
-    return f"{FUSED_DIR}/{subject}/hipp_subfields_in_meld_space.nii.gz"
+    targets += expand(
+        f"{ANALYSIS_DIR}/{{subject}}/lesion_in_clusters_{{subject}}.csv",
+        subject=SUBJECTS,
+    )
+    targets.append(f"{MELD_DATA}/output/cohort_lesion_stats.csv")
+    if ENABLE_ANALYSIS_VIZ:
+        targets += expand(
+            f"{ANALYSIS_DIR}/{{subject}}/figures/.done",
+            subject=SUBJECTS,
+        )
+    return targets
 
 
 rule all:
     input:
-        expand(
-            f"{FUSED_DIR}/{{subject}}/hipp_subfields_in_meld_space.nii.gz",
-            subject=SUBJECTS,
-        ),
+        _all_targets,
 
 
 rule meld_prepare:
     output:
         touch(f"{MELD_DATA}/.cohort_synced"),
-    params:
-        script=f"{workflow.basedir}/scripts/prepare_meld_from_bids.sh",
     shell:
         """
         export MELD_DEPLOY_ROOT={MELD_DEPLOY}
         export MELD_DATA_DIR={MELD_DATA}
-        bash {params.script} {MELD_DATA} {BIDS_DIR} {MELD_COHORT} "{SUBJECTS_FILTER}"
+        bash {workflow.basedir}/scripts/prepare_meld_from_bids.sh {MELD_DATA} {BIDS_DIR} {MELD_COHORT} "{SUBJECTS_FILTER}"
         export MELD_DATA_DIR={MELD_DATA}
         export MELD_DEPLOY_ROOT={MELD_DEPLOY}
         bash {MELD_DOCKER} cohort sync
@@ -153,3 +161,70 @@ rule fuse_to_meld_space:
             --hippunfold-subject-dir {HIPP_OUT}/{wildcards.subject} \
             --out-dir {params.out_dir}
         """
+
+
+rule lesion_stats:
+    """MELD_CBF-style lesion stats: T1 scalar + aparc ROI/mirror asymmetry + hipp overlap."""
+    input:
+        pred=f"{MELD_DATA}/output/predictions_reports/{{subject}}/predictions/prediction.nii.gz",
+        t1=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/T1.mgz",
+        aparc=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/aparc+aseg.mgz",
+        fused=f"{FUSED_DIR}/{{subject}}/hipp_subfields_in_meld_space.nii.gz",
+    output:
+        csv=f"{ANALYSIS_DIR}/{{subject}}/lesion_in_clusters_{{subject}}.csv",
+    params:
+        script=f"{workflow.basedir}/analysis/lesion_stats.py",
+        out_dir=lambda wc: f"{ANALYSIS_DIR}/{wc.subject}",
+    shell:
+        """
+        mkdir -p {params.out_dir}
+        PYTHONNOUSERSITE=1 python {params.script} \
+            {wildcards.subject} \
+            {input.t1} \
+            {input.pred} \
+            {input.aparc} \
+            {output.csv} \
+            {input.fused} \
+            {HYPO_Z}
+        """
+
+
+rule lesion_visualize:
+    input:
+        t1=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/T1.mgz",
+        pred=f"{MELD_DATA}/output/predictions_reports/{{subject}}/predictions/prediction.nii.gz",
+        fused=f"{FUSED_DIR}/{{subject}}/hipp_subfields_in_meld_space.nii.gz",
+        stats=f"{ANALYSIS_DIR}/{{subject}}/lesion_in_clusters_{{subject}}.csv",
+    output:
+        touch(f"{ANALYSIS_DIR}/{{subject}}/figures/.done"),
+    params:
+        script=f"{workflow.basedir}/analysis/lesion_visualize.py",
+        out_dir=lambda wc: f"{ANALYSIS_DIR}/{wc.subject}/figures",
+    shell:
+        """
+        mkdir -p {params.out_dir}
+        PYTHONNOUSERSITE=1 python {params.script} \
+            {wildcards.subject} \
+            {input.t1} \
+            {input.pred} \
+            {input.fused} \
+            {params.out_dir}
+        """
+
+
+rule lesion_aggregate:
+    input:
+        csvs=expand(
+            f"{ANALYSIS_DIR}/{{subject}}/lesion_in_clusters_{{subject}}.csv",
+            subject=SUBJECTS,
+        ),
+    output:
+        f"{MELD_DATA}/output/cohort_lesion_stats.csv",
+    params:
+        asym=lambda w: config.get("asym_concordance_pct", -8.0),
+        dice=lambda w: config.get("dice_concordance", 0.10),
+        allow_partial=lambda w: _cfg_bool("allow_partial_aggregate", True),
+        expected=lambda w: len(SUBJECTS),
+        pipeline_version=lambda w: config.get("pipeline_version", "meldhip"),
+    script:
+        "scripts/aggregate_lesion_stats.py"

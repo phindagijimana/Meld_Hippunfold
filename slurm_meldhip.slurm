@@ -70,6 +70,7 @@ snakemake \
     "subjects=${subj_list}" \
     "meld_extra_flags=${MELD_EXTRA_FLAGS:-}" \
     "hippunfold_extra_flags=${HIPP_EXTRA_FLAGS:-}" \
+    "enable_analysis_viz=${ENABLE_ANALYSIS_VIZ:-true}" \
     "snakemake_cores=${SLURM_CPUS_PER_TASK:-8}" \
   --cores "${SLURM_CPUS_PER_TASK:-8}" \
   --resources heavy_fs=1 hippunfold=2 \

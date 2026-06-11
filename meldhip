@@ -38,7 +38,7 @@ warn() { echo -e "${YELLOW}meldhip:${NC} $*"; }
 
 usage() {
   cat <<EOF
-Meld_Hippunfold — Snakemake pipeline (MELD Graph + HippUnfold + T1 fusion)
+Meld_Hippunfold — Snakemake pipeline (MELD + HippUnfold + lesion analysis)
 
   ./meldhip install [opts]     Pull Apptainer images + Python venv (Snakemake, nibabel)
   ./meldhip start [opts]       Submit SLURM job running Snakemake (alias: slurm)
@@ -51,6 +51,7 @@ start options:
   -p, --participant L...       Subject(s); 'sub-' optional. Default: all sub-* in BIDS
   --meld-flags STR             Extra flags passed to meld-docker run
   --hipp-flags STR             Extra flags passed to HippUnfold
+  --no-analysis-viz            Stats + cohort CSV only; skip overlay PNGs
   --dry-run                    Snakemake -n only (local, not via SLURM)
 
 Environment / production.env:
@@ -206,7 +207,8 @@ cmd_check() {
   if [[ -f "$VENV/bin/activate" ]]; then
     # shellcheck source=/dev/null
     source "$VENV/bin/activate"
-    if python -c "import snakemake, nibabel" 2>/dev/null; then ok "[ok] venv: snakemake + nibabel"
+    if python -c "import snakemake, nibabel, pandas, nilearn" 2>/dev/null; then
+      ok "[ok] venv: snakemake + nibabel + pandas + nilearn"
     else warn "[missing] venv packages — run: ./meldhip install"; critical=1; fi
   else
     warn "[missing] venv — run: ./meldhip install"; critical=1
@@ -229,7 +231,7 @@ cmd_check() {
 
 write_run_config() {
   local bids="$1" work_dir="$2" subjects_str="$3" meld_flags="$4" hipp_flags="$5"
-  local allow_missing_sif="${6:-0}"
+  local allow_missing_sif="${6:-0}" enable_analysis_viz="${7:-true}"
   bids="$(cd "$bids" && pwd)"
   work_dir="$(mkdir -p "$work_dir" && cd "$work_dir" && pwd)"
   local meld_sif hipp_sif
@@ -257,6 +259,7 @@ export FUSED_DIR='$work_dir/fused'
 export SUBJECTS_FILTER='$subjects_str'
 export MELD_EXTRA_FLAGS='$meld_flags'
 export HIPP_EXTRA_FLAGS='$hipp_flags'
+export ENABLE_ANALYSIS_VIZ='$enable_analysis_viz'
 EOF
 }
 
@@ -280,6 +283,7 @@ subjects_snakemake_list() {
 
 cmd_start() {
   local bids="" work_dir="$ROOT/work" subjects_str="" meld_flags="" hipp_flags="" dry_run=0
+  local enable_analysis_viz=true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -i|--bids) bids="${2:?}"; shift 2 ;;
@@ -300,6 +304,7 @@ cmd_start() {
         ;;
       --meld-flags) meld_flags="${2:?}"; shift 2 ;;
       --hipp-flags) hipp_flags="${2:?}"; shift 2 ;;
+      --no-analysis-viz) enable_analysis_viz=false; shift ;;
       --dry-run) dry_run=1; shift ;;
       *) die "unknown option: $1 (see ./meldhip help)" ;;
     esac
@@ -308,7 +313,8 @@ cmd_start() {
   [[ -n "$bids" ]] || die "BIDS dir required: ./meldhip start -i /path/to/bids"
   [[ -d "$bids" ]] || die "BIDS dir not found: $bids"
 
-  write_run_config "$bids" "$work_dir" "$subjects_str" "$meld_flags" "$hipp_flags" "$dry_run"
+  write_run_config "$bids" "$work_dir" "$subjects_str" "$meld_flags" "$hipp_flags" "$dry_run" \
+    "$enable_analysis_viz"
   # shellcheck source=/dev/null
   source "$RUN_CONFIG"
   activate_venv
@@ -330,6 +336,7 @@ cmd_start() {
     "subjects=${subj_list}"
     "meld_extra_flags=${MELD_EXTRA_FLAGS}"
     "hippunfold_extra_flags=${HIPP_EXTRA_FLAGS}"
+    "enable_analysis_viz=${enable_analysis_viz}"
     --reason
     --latency-wait "${SNAKEMAKE_LATENCY_WAIT:-60}"
   )

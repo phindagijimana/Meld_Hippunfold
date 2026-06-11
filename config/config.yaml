@@ -34,3 +34,12 @@ latency_wait: 60
 # Limit concurrent heavy container jobs (FreeSurfer / nnU-Net memory)
 resource_heavy_fs: 1
 resource_hippunfold: 2
+
+# --- lesion analysis (ported from MELD_CBF; see USER_GUIDE.md) ---
+# Scalar map = MELD T1.mgz (already on prediction grid; no extra registration).
+enable_analysis_viz: true
+hypo_z: -1.5
+asym_concordance_pct: -8.0
+dice_concordance: 0.10
+allow_partial_aggregate: true
+pipeline_version: "meldhip"
