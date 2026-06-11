@@ -47,7 +47,8 @@ cp production.env.example production.env   # optional site paths
 
 ## Documentation
 
-- **[USER_GUIDE.md](USER_GUIDE.md)** — pipeline DAG, CLI, config, metrics, troubleshooting
+- **[Meld_Hippunfold.md](Meld_Hippunfold.md)** — full pipeline reference with diagrams
+- **[USER_GUIDE.md](USER_GUIDE.md)** — CLI, config, metrics, troubleshooting
 - **[meld.md](meld.md)** — MELD Graph container and `meld-docker` reuse
 - **[hip.md](hip.md)** — HippUnfold container and `run_hippunfold.sh` reuse
 
