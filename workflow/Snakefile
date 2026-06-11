@@ -1,0 +1,155 @@
+"""Meld_Hippunfold: MELD Graph + HippUnfold + native-T1 fusion (Snakemake)."""
+
+import os
+from pathlib import Path
+
+configfile: "../config/config.yaml"  # noqa: F821 — Snakemake configfile directive
+
+ROOT = Path(workflow.basedir).parent.resolve()  # noqa: F821
+
+
+def _abs(path: str) -> str:
+    p = Path(path)
+    if p.is_absolute():
+        return str(p.resolve())
+    return str((ROOT / p).resolve())
+
+
+def _subjects() -> list[str]:
+    bids = Path(_abs(config["bids_dir"]))
+    if not bids.is_dir():
+        return list(config.get("subjects") or [])
+    all_subs = sorted(p.name for p in bids.glob("sub-*") if p.is_dir())
+    want = config.get("subjects") or []
+    if not want:
+        return all_subs
+    norm = []
+    for s in want:
+        s = str(s)
+        norm.append(s if s.startswith("sub-") else f"sub-{s}")
+    return [s for s in all_subs if s in norm] or norm
+
+
+MELD_DEPLOY = _abs(config["meld_deploy_root"])
+HIPP_ROOT = _abs(config["hippunfold_root"])
+MELD_DOCKER = str(Path(MELD_DEPLOY) / "meld-docker")
+RUN_HIPP = str(Path(HIPP_ROOT) / "run_hippunfold.sh")
+
+MELD_DATA = _abs(config["meld_data_dir"])
+HIPP_OUT = _abs(config["hippunfold_out_dir"])
+FUSED_DIR = _abs(config["fused_dir"])
+BIDS_DIR = _abs(config["bids_dir"])
+
+MELD_EXTRA = config.get("meld_extra_flags", "") or ""
+HIPP_EXTRA = config.get("hippunfold_extra_flags", "") or ""
+HIPP_MOD = config.get("hippunfold_modality", "T1w")
+HIPP_SPACES = config.get("hippunfold_output_spaces", "T1w")
+MELD_COHORT = config.get("meld_cohort", "from_bids")
+
+SUBJECTS = _subjects()
+if not SUBJECTS:
+    raise ValueError(
+        "No subjects to process. Set bids_dir and ensure sub-* folders exist, "
+        "or pass subjects: [sub-001, ...] in config."
+    )
+
+SUBJECTS_FILTER = " ".join(SUBJECTS)
+
+
+def meld_prediction(subject: str) -> str:
+    return (
+        f"{MELD_DATA}/output/predictions_reports/{subject}/predictions/prediction.nii.gz"
+    )
+
+
+def hipp_subject_dir(subject: str) -> str:
+    return f"{HIPP_OUT}/{subject}"
+
+
+def fused_hipp(subject: str) -> str:
+    return f"{FUSED_DIR}/{subject}/hipp_subfields_in_meld_space.nii.gz"
+
+
+rule all:
+    input:
+        expand(
+            f"{FUSED_DIR}/{{subject}}/hipp_subfields_in_meld_space.nii.gz",
+            subject=SUBJECTS,
+        ),
+
+
+rule meld_prepare:
+    output:
+        touch(f"{MELD_DATA}/.cohort_synced"),
+    params:
+        script=f"{workflow.basedir}/scripts/prepare_meld_from_bids.sh",
+    shell:
+        """
+        export MELD_DEPLOY_ROOT={MELD_DEPLOY}
+        export MELD_DATA_DIR={MELD_DATA}
+        bash {params.script} {MELD_DATA} {BIDS_DIR} {MELD_COHORT} "{SUBJECTS_FILTER}"
+        export MELD_DATA_DIR={MELD_DATA}
+        export MELD_DEPLOY_ROOT={MELD_DEPLOY}
+        bash {MELD_DOCKER} cohort sync
+        """
+
+
+rule meld_predict:
+    input:
+        sync=f"{MELD_DATA}/.cohort_synced",
+    output:
+        pred=f"{MELD_DATA}/output/predictions_reports/{{subject}}/predictions/prediction.nii.gz",
+        done=touch(f"{MELD_DATA}/.meld_done_{{subject}}"),
+    resources:
+        heavy_fs=int(config.get("resource_heavy_fs", 1)),
+    shell:
+        """
+        export MELD_DATA_DIR={MELD_DATA}
+        export MELD_DEPLOY_ROOT={MELD_DEPLOY}
+        bash {MELD_DOCKER} run {wildcards.subject} {MELD_EXTRA}
+        test -f {output.pred}
+        """
+
+
+rule hippunfold_predict:
+    output:
+        marker=touch(f"{HIPP_OUT}/.hipp_done_{{subject}}"),
+    params:
+        label=lambda wc: wc.subject.replace("sub-", "", 1),
+    resources:
+        hippunfold=int(config.get("resource_hippunfold", 2)),
+    shell:
+        """
+        export HIPPUNFOLD_SIF="${{HIPPUNFOLD_SIF:?set HIPPUNFOLD_SIF}}"
+        export HIPPUNFOLD_CACHE_DIR="${{HIPPUNFOLD_CACHE_DIR:-$HOME/hippunfold_cache}}"
+        export SINGULARITY_BINDPATH="{BIDS_DIR}:{BIDS_DIR},{HIPP_OUT}:{HIPP_OUT},${{HIPPUNFOLD_CACHE_DIR}}:${{HIPPUNFOLD_CACHE_DIR}}"
+        export APPTAINER_BINDPATH="$SINGULARITY_BINDPATH"
+        export PYTHONNOUSERSITE=1
+        mkdir -p {HIPP_OUT} "$HIPPUNFOLD_CACHE_DIR"
+        bash {RUN_HIPP} {BIDS_DIR} {HIPP_OUT} participant \
+            --participant_label {params.label} \
+            --modality {HIPP_MOD} \
+            --output_spaces {HIPP_SPACES} \
+            -p --cores {config[snakemake_cores]} {HIPP_EXTRA}
+        test -d {HIPP_OUT}/{wildcards.subject}/anat
+        """
+
+
+rule fuse_to_meld_space:
+    input:
+        meld=f"{MELD_DATA}/output/predictions_reports/{{subject}}/predictions/prediction.nii.gz",
+        hipp=f"{HIPP_OUT}/.hipp_done_{{subject}}",
+    output:
+        fused=f"{FUSED_DIR}/{{subject}}/hipp_subfields_in_meld_space.nii.gz",
+        manifest=f"{FUSED_DIR}/{{subject}}/fusion_manifest.json",
+    params:
+        script=f"{workflow.basedir}/scripts/fuse_hippunfold_to_meld.py",
+        out_dir=lambda wc: f"{FUSED_DIR}/{wc.subject}",
+    shell:
+        """
+        PYTHONNOUSERSITE=1 python {params.script} \
+            --subject {wildcards.subject} \
+            --meld-prediction {input.meld} \
+            --hippunfold-subject-dir {HIPP_OUT}/{wildcards.subject} \
+            --out-dir {params.out_dir}
+        """

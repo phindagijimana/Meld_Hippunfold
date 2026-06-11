@@ -1,0 +1,422 @@
+#!/usr/bin/env bash
+# Meld_Hippunfold production CLI: install, start, check, logs
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="$ROOT/.meldhip"
+VENV="$STATE_DIR/venv"
+LAST_JOB_FILE="$STATE_DIR/last_job_id"
+RUN_CONFIG="$STATE_DIR/run_config.env"
+SLURM_SCRIPT="$ROOT/slurm_meldhip.slurm"
+DEFAULT_CONFIG="$ROOT/config/config.yaml"
+
+mkdir -p "$STATE_DIR"
+
+# Optional site overrides
+if [[ -f "$ROOT/production.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$ROOT/production.env"
+  set +a
+fi
+
+MELD_DEPLOY_ROOT="${MELD_DEPLOY_ROOT:-$ROOT/../Meld_Graph/docker_version}"
+HIPPUNFOLD_ROOT="${HIPPUNFOLD_ROOT:-$ROOT/../HippUnfold}"
+MELD_IMAGE_TAG="${MELD_IMAGE_TAG:-v2.2.4}"
+HIPPUNFOLD_IMAGE_TAG="${HIPPUNFOLD_IMAGE_TAG:-latest}"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+die() { echo -e "${RED}meldhip:${NC} $*" >&2; exit 1; }
+info() { echo -e "${CYAN}meldhip:${NC} $*"; }
+ok() { echo -e "${GREEN}meldhip:${NC} $*"; }
+warn() { echo -e "${YELLOW}meldhip:${NC} $*"; }
+
+usage() {
+  cat <<EOF
+Meld_Hippunfold — Snakemake pipeline (MELD Graph + HippUnfold + T1 fusion)
+
+  ./meldhip install [opts]     Pull Apptainer images + Python venv (Snakemake, nibabel)
+  ./meldhip start [opts]       Submit SLURM job running Snakemake (alias: slurm)
+  ./meldhip check              Verify images, licenses, helpers, BIDS, venv
+  ./meldhip logs [-f] [JOB]    Tail SLURM + Snakemake logs (default: last job)
+
+start options:
+  -i, --bids DIR               BIDS input directory (required)
+  -w, --work-dir DIR           Work root (default: \$ROOT/work)
+  -p, --participant L...       Subject(s); 'sub-' optional. Default: all sub-* in BIDS
+  --meld-flags STR             Extra flags passed to meld-docker run
+  --hipp-flags STR             Extra flags passed to HippUnfold
+  --dry-run                    Snakemake -n only (local, not via SLURM)
+
+Environment / production.env:
+  MELD_DEPLOY_ROOT             meld-docker bundle (default: ../Meld_Graph/docker_version)
+  HIPPUNFOLD_ROOT              run_hippunfold.sh location (default: ../HippUnfold)
+  MELD_IMAGE_TAG / HIPPUNFOLD_IMAGE_TAG
+  HIPPUNFOLD_SIF / MELD_CONTAINER_IMAGE   Override image paths after install
+  HIPPUNFOLD_CACHE_DIR         nnU-Net model cache (default: \$SCRATCH/hippunfold_cache)
+
+EOF
+}
+
+resolve_runtime() {
+  if command -v apptainer >/dev/null 2>&1; then echo apptainer
+  elif command -v singularity >/dev/null 2>&1; then echo singularity
+  else die "apptainer/singularity not on PATH"
+  fi
+}
+
+meld_sif_path() {
+  if [[ -n "${MELD_CONTAINER_IMAGE:-}" && -f "${MELD_CONTAINER_IMAGE}" ]]; then
+    echo "${MELD_CONTAINER_IMAGE}"
+    return 0
+  fi
+  local tag="${MELD_IMAGE_TAG}"
+  local cand="${MELD_DEPLOY_ROOT}/meld_graph_${tag}.sif"
+  if [[ -f "$cand" ]]; then echo "$cand"; return 0; fi
+  cand="${MELD_DEPLOY_ROOT}/meld_graph_v${tag#v}.sif"
+  [[ -f "$cand" ]] && echo "$cand" && return 0
+  return 1
+}
+
+hipp_sif_path() {
+  if [[ -n "${HIPPUNFOLD_SIF:-}" && -f "${HIPPUNFOLD_SIF}" ]]; then
+    echo "${HIPPUNFOLD_SIF}"
+    return 0
+  fi
+  local tag="${HIPPUNFOLD_IMAGE_TAG}"
+  local cand="${HIPPUNFOLD_ROOT}/khanlab_hippunfold_${tag//./_}.sif"
+  [[ -f "$cand" ]] && echo "$cand" && return 0
+  return 1
+}
+
+activate_venv() {
+  [[ -f "$VENV/bin/activate" ]] || die "venv missing — run: ./meldhip install"
+  # shellcheck source=/dev/null
+  source "$VENV/bin/activate"
+}
+
+cmd_install() {
+  local pull_meld=1 pull_hipp=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --meld-only) pull_hipp=0; shift ;;
+      --hipp-only) pull_meld=0; shift ;;
+      *) break ;;
+    esac
+  done
+
+  local rt
+  rt="$(resolve_runtime)"
+  mkdir -p "$MELD_DEPLOY_ROOT" "$HIPPUNFOLD_ROOT" "$STATE_DIR"
+
+  if [[ "$pull_meld" -eq 1 ]]; then
+    local meld_sif
+    meld_sif="${MELD_DEPLOY_ROOT}/meld_graph_${MELD_IMAGE_TAG}.sif"
+    if [[ -f "$meld_sif" ]]; then
+      ok "MELD image present: $meld_sif"
+    else
+      info "Pulling docker://meldproject/meld_graph:${MELD_IMAGE_TAG} ..."
+      export TMPDIR="${TMPDIR:-$HOME/apptainer_tmp}"
+      mkdir -p "$TMPDIR"
+      export APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-$TMPDIR}"
+      export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-$HOME/.cache/apptainer}"
+      "$rt" pull "$meld_sif" "docker://meldproject/meld_graph:${MELD_IMAGE_TAG}"
+      ok "MELD image -> $meld_sif"
+    fi
+    echo "$meld_sif" >"$STATE_DIR/meld_sif"
+  fi
+
+  if [[ "$pull_hipp" -eq 1 ]]; then
+    local hipp_sif
+    if hipp_sif="$(hipp_sif_path 2>/dev/null)"; then
+      ok "HippUnfold image present: $hipp_sif"
+    else
+      info "Pulling HippUnfold tag ${HIPPUNFOLD_IMAGE_TAG} via ${HIPPUNFOLD_ROOT}/pull_sif.sh"
+      [[ -x "${HIPPUNFOLD_ROOT}/pull_sif.sh" ]] || die "missing ${HIPPUNFOLD_ROOT}/pull_sif.sh"
+      (cd "$HIPPUNFOLD_ROOT" && OUT_DIR="$HIPPUNFOLD_ROOT" "$HIPPUNFOLD_ROOT/pull_sif.sh" "$HIPPUNFOLD_IMAGE_TAG")
+      hipp_sif="$(hipp_sif_path)" || die "HippUnfold .sif not found after pull"
+      ok "HippUnfold image -> $hipp_sif"
+    fi
+    echo "$hipp_sif" >"$STATE_DIR/hipp_sif"
+  fi
+
+  export TMPDIR="${TMPDIR:-$HOME/apptainer_tmp}"
+  mkdir -p "$TMPDIR"
+  export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$STATE_DIR/pip_cache}"
+  mkdir -p "$PIP_CACHE_DIR"
+
+  if [[ ! -f "$VENV/bin/activate" ]]; then
+    info "Creating Python venv at $VENV"
+    python3 -m venv "$VENV"
+  fi
+  # shellcheck source=/dev/null
+  source "$VENV/bin/activate"
+  pip install -q --upgrade pip
+  pip install -q -r "$ROOT/requirements.txt"
+  ok "Python deps installed (snakemake, nibabel)"
+  ok "install complete"
+}
+
+cmd_check() {
+  local critical=0
+
+  info "Meld_Hippunfold root: $ROOT"
+  info "MELD deploy:         $MELD_DEPLOY_ROOT"
+  info "HippUnfold root:     $HIPPUNFOLD_ROOT"
+  echo ""
+
+  for b in apptainer singularity sbatch python3; do
+    if command -v "$b" >/dev/null 2>&1; then ok "[ok] $b"
+    else warn "[missing] $b"; critical=1; fi
+  done
+
+  if [[ -x "${MELD_DEPLOY_ROOT}/meld-docker" ]]; then ok "[ok] meld-docker"
+  else warn "[missing] ${MELD_DEPLOY_ROOT}/meld-docker"; critical=1; fi
+
+  if [[ -x "${HIPPUNFOLD_ROOT}/run_hippunfold.sh" ]]; then ok "[ok] run_hippunfold.sh"
+  else warn "[missing] ${HIPPUNFOLD_ROOT}/run_hippunfold.sh"; critical=1; fi
+
+  local ms hs
+  if ms="$(meld_sif_path 2>/dev/null)"; then ok "[ok] MELD SIF: $ms"
+  else warn "[missing] MELD SIF — run: ./meldhip install"; critical=1; fi
+
+  if hs="$(hipp_sif_path 2>/dev/null)"; then ok "[ok] HippUnfold SIF: $hs"
+  else warn "[missing] HippUnfold SIF — run: ./meldhip install"; critical=1; fi
+
+  for lic in "${MELD_DEPLOY_ROOT}/freesurfer_license.txt" "${MELD_DEPLOY_ROOT}/meld_license.txt"; do
+    if [[ -f "$lic" ]]; then ok "[ok] license $(basename "$lic")"
+    else warn "[missing] $lic"; critical=1; fi
+  done
+
+  local meld_data="${MELD_DATA_DIR:-$ROOT/work/meld_data}"
+  for d in models meld_params; do
+    if [[ -d "${meld_data}/${d}" ]] && compgen -G "${meld_data}/${d}/*" &>/dev/null; then
+      ok "[ok] meld_data/${d}"
+    else
+      warn "[missing/empty] ${meld_data}/${d} (copy from MELD Graph setup)"
+      critical=1
+    fi
+  done
+
+  if [[ -f "$VENV/bin/activate" ]]; then
+    # shellcheck source=/dev/null
+    source "$VENV/bin/activate"
+    if python -c "import snakemake, nibabel" 2>/dev/null; then ok "[ok] venv: snakemake + nibabel"
+    else warn "[missing] venv packages — run: ./meldhip install"; critical=1; fi
+  else
+    warn "[missing] venv — run: ./meldhip install"; critical=1
+  fi
+
+  if [[ -f "$RUN_CONFIG" ]]; then
+    # shellcheck source=/dev/null
+    source "$RUN_CONFIG"
+    if [[ -n "${BIDS_DIR:-}" && -d "${BIDS_DIR}" ]]; then
+      local n
+      n=$(find "${BIDS_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'sub-*' 2>/dev/null | wc -l)
+      ok "[ok] last run BIDS_DIR=$BIDS_DIR ($n subjects)"
+    fi
+  fi
+
+  echo ""
+  if [[ "$critical" -eq 0 ]]; then ok "check passed — ready for ./meldhip start -i <bids>"
+  else die "check failed ($critical critical items)"; fi
+}
+
+write_run_config() {
+  local bids="$1" work_dir="$2" subjects_str="$3" meld_flags="$4" hipp_flags="$5"
+  local allow_missing_sif="${6:-0}"
+  bids="$(cd "$bids" && pwd)"
+  work_dir="$(mkdir -p "$work_dir" && cd "$work_dir" && pwd)"
+  local meld_sif hipp_sif
+  if meld_sif="$(meld_sif_path 2>/dev/null)"; then :; else
+    [[ "$allow_missing_sif" -eq 1 ]] || die "MELD SIF not found — ./meldhip install"
+    meld_sif=""
+  fi
+  if hipp_sif="$(hipp_sif_path 2>/dev/null)"; then :; else
+    [[ "$allow_missing_sif" -eq 1 ]] || die "HippUnfold SIF not found — ./meldhip install"
+    hipp_sif=""
+  fi
+
+  cat >"$RUN_CONFIG" <<EOF
+# Generated by ./meldhip start — sourced by slurm_meldhip.slurm
+export BIDS_DIR='$bids'
+export WORK_DIR='$work_dir'
+export MELD_DEPLOY_ROOT='$MELD_DEPLOY_ROOT'
+export HIPPUNFOLD_ROOT='$HIPPUNFOLD_ROOT'
+export MELD_CONTAINER_IMAGE='$meld_sif'
+export HIPPUNFOLD_SIF='$hipp_sif'
+export HIPPUNFOLD_CACHE_DIR='${HIPPUNFOLD_CACHE_DIR:-${SCRATCH:-$HOME}/hippunfold_cache}'
+export MELD_DATA_DIR='$work_dir/meld_data'
+export HIPPUNFOLD_OUT_DIR='$work_dir/hippunfold'
+export FUSED_DIR='$work_dir/fused'
+export SUBJECTS_FILTER='$subjects_str'
+export MELD_EXTRA_FLAGS='$meld_flags'
+export HIPP_EXTRA_FLAGS='$hipp_flags'
+EOF
+}
+
+subjects_snakemake_list() {
+  local subjects_str="$1"
+  if [[ -z "$subjects_str" ]]; then
+    echo "[]"
+    return
+  fi
+  local out="["
+  local first=1 s
+  for s in $subjects_str; do
+    [[ "$s" == sub-* ]] || s="sub-$s"
+    [[ "$first" -eq 1 ]] || out+=", "
+    out+="'$s'"
+    first=0
+  done
+  out+="]"
+  echo "$out"
+}
+
+cmd_start() {
+  local bids="" work_dir="$ROOT/work" subjects_str="" meld_flags="" hipp_flags="" dry_run=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -i|--bids) bids="${2:?}"; shift 2 ;;
+      -w|--work-dir) work_dir="${2:?}"; shift 2 ;;
+      -p|--participant)
+        shift
+        while [[ $# -gt 0 && "$1" != -* ]]; do
+          local parts p
+          IFS=', ' read -r -a parts <<< "$1"
+          for p in "${parts[@]}"; do
+            [[ -z "$p" ]] && continue
+            p="${p#sub-}"
+            subjects_str+=" sub-${p}"
+          done
+          shift
+        done
+        subjects_str="${subjects_str# }"
+        ;;
+      --meld-flags) meld_flags="${2:?}"; shift 2 ;;
+      --hipp-flags) hipp_flags="${2:?}"; shift 2 ;;
+      --dry-run) dry_run=1; shift ;;
+      *) die "unknown option: $1 (see ./meldhip help)" ;;
+    esac
+  done
+
+  [[ -n "$bids" ]] || die "BIDS dir required: ./meldhip start -i /path/to/bids"
+  [[ -d "$bids" ]] || die "BIDS dir not found: $bids"
+
+  write_run_config "$bids" "$work_dir" "$subjects_str" "$meld_flags" "$hipp_flags" "$dry_run"
+  # shellcheck source=/dev/null
+  source "$RUN_CONFIG"
+  activate_venv
+
+  local subj_list
+  subj_list="$(subjects_snakemake_list "$subjects_str")"
+
+  local sm_args=(
+    -s "$ROOT/workflow/Snakefile"
+    --configfile "$DEFAULT_CONFIG"
+    --config
+    "bids_dir=${BIDS_DIR}"
+    "work_dir=${WORK_DIR}"
+    "meld_data_dir=${MELD_DATA_DIR}"
+    "hippunfold_out_dir=${HIPPUNFOLD_OUT_DIR}"
+    "fused_dir=${FUSED_DIR}"
+    "meld_deploy_root=${MELD_DEPLOY_ROOT}"
+    "hippunfold_root=${HIPPUNFOLD_ROOT}"
+    "subjects=${subj_list}"
+    "meld_extra_flags=${MELD_EXTRA_FLAGS}"
+    "hippunfold_extra_flags=${HIPP_EXTRA_FLAGS}"
+    --reason
+    --latency-wait "${SNAKEMAKE_LATENCY_WAIT:-60}"
+  )
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    info "dry-run (local)"
+    snakemake "${sm_args[@]}" -n --cores 1
+    return 0
+  fi
+
+  command -v sbatch >/dev/null 2>&1 || die "sbatch not found (use --dry-run for local plan)"
+  [[ -f "$SLURM_SCRIPT" ]] || die "missing $SLURM_SCRIPT"
+
+  info "submitting SLURM job (BIDS=$BIDS_DIR work=$WORK_DIR)"
+  local sub_out id
+  sub_out="$(cd "$ROOT" && sbatch --export=ALL "$SLURM_SCRIPT")"
+  echo "$sub_out"
+  id="$(echo "$sub_out" | awk '{print $NF}')"
+  [[ -n "$id" ]] || die "could not parse job id"
+  echo "$id" >"$LAST_JOB_FILE"
+  ok "job $id saved to $LAST_JOB_FILE"
+}
+
+resolve_job() {
+  local j="${1:-}"
+  if [[ -z "$j" ]]; then
+    [[ -f "$LAST_JOB_FILE" ]] || die "no JOB and no $LAST_JOB_FILE"
+    j="$(cat "$LAST_JOB_FILE")"
+  fi
+  echo "$j"
+}
+
+cmd_logs() {
+  local follow=0
+  if [[ "${1:-}" == "-f" ]]; then follow=1; shift; fi
+  local job
+  job="$(resolve_job "${1:-}")"
+  local err="$ROOT/meldhip_${job}.err"
+  local out="$ROOT/meldhip_${job}.out"
+  local smlog=""
+  if [[ -f "$RUN_CONFIG" ]]; then
+    # shellcheck source=/dev/null
+    source "$RUN_CONFIG"
+    smlog="${WORK_DIR}/snakemake_${job}.log"
+  fi
+
+  [[ -f "$err" || -f "$out" || -f "$smlog" ]] || die "no logs for job $job yet"
+
+  if [[ "$follow" -eq 1 ]]; then
+    tail -n 5 -f "$err" "$out" ${smlog:+"$smlog"} 2>/dev/null
+    return
+  fi
+
+  if [[ -f "$err" ]]; then
+    info "--- $err (tail) ---"
+    tail -n 80 "$err"
+  fi
+  if [[ -f "$out" ]]; then
+    info "--- $out (tail) ---"
+    tail -n 40 "$out"
+  fi
+  if [[ -f "$smlog" ]]; then
+    info "--- $smlog (tail) ---"
+    tail -n 60 "$smlog"
+  fi
+
+  if [[ -f "$RUN_CONFIG" ]]; then
+  # shellcheck source=/dev/null
+  source "$RUN_CONFIG"
+    if [[ -d "${FUSED_DIR}" ]]; then
+      info "fused outputs under ${FUSED_DIR}:"
+      find "${FUSED_DIR}" -name 'fusion_manifest.json' 2>/dev/null | head -10 || true
+    fi
+  fi
+}
+
+main() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    install) cmd_install "$@" ;;
+    start|slurm) cmd_start "$@" ;;
+    check) cmd_check ;;
+    logs) cmd_logs "$@" ;;
+    help|-h|--help|'') usage ;;
+    *) die "unknown command: $sub — try ./meldhip help" ;;
+  esac
+}
+
+main "$@"

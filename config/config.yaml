@@ -1,0 +1,36 @@
+# Meld_Hippunfold Snakemake defaults. Override via production.env, ./meldhip start -c key=val,
+# or a custom --configfile.
+
+# --- deploy roots (sibling repos; override if your layout differs) ---
+meld_deploy_root: "../Meld_Graph/docker_version"
+hippunfold_root: "../HippUnfold"
+
+# Container tags for ./meldhip install
+meld_image_tag: "v2.2.4"
+hippunfold_image_tag: "latest"
+
+# --- data layout (under Meld_Hippunfold root unless absolute) ---
+work_dir: "work"
+meld_data_dir: "work/meld_data"
+hippunfold_out_dir: "work/hippunfold"
+fused_dir: "work/fused"
+meld_cohort: "from_bids"
+
+# Set at runtime by ./meldhip start (required for pipeline)
+bids_dir: ""
+# Empty list = all sub-* in bids_dir; else e.g. ["sub-001", "sub-002"]
+subjects: []
+
+# --- pipeline options ---
+hippunfold_modality: "T1w"
+hippunfold_output_spaces: "T1w"
+meld_extra_flags: ""
+hippunfold_extra_flags: ""
+
+# Snakemake / cluster
+snakemake_cores: 8
+latency_wait: 60
+
+# Limit concurrent heavy container jobs (FreeSurfer / nnU-Net memory)
+resource_heavy_fs: 1
+resource_hippunfold: 2

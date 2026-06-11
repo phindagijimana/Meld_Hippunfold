@@ -1,0 +1,9 @@
+.meldhip/
+work/
+production.env
+*.sif
+meldhip_*.out
+meldhip_*.err
+__pycache__/
+*.pyc
+.snakemake/
