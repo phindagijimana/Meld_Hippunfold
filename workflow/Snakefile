@@ -107,6 +107,8 @@ rule meld_predict:
         sync=f"{MELD_DATA}/.cohort_synced",
     output:
         pred=f"{MELD_DATA}/output/predictions_reports/{{subject}}/predictions/prediction.nii.gz",
+        t1=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/T1.mgz",
+        aparc=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/aparc+aseg.mgz",
         done=touch(f"{MELD_DATA}/.meld_done_{{subject}}"),
     resources:
         heavy_fs=int(config.get("resource_heavy_fs", 1)),
@@ -116,6 +118,8 @@ rule meld_predict:
         export MELD_DEPLOY_ROOT={MELD_DEPLOY}
         bash {MELD_DOCKER} run {wildcards.subject} {MELD_EXTRA}
         test -f {output.pred}
+        test -f {output.t1}
+        test -f {output.aparc}
         """
 
 
@@ -169,6 +173,7 @@ rule lesion_stats:
         pred=f"{MELD_DATA}/output/predictions_reports/{{subject}}/predictions/prediction.nii.gz",
         t1=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/T1.mgz",
         aparc=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/aparc+aseg.mgz",
+        meld_done=f"{MELD_DATA}/.meld_done_{{subject}}",
         fused=f"{FUSED_DIR}/{{subject}}/hipp_subfields_in_meld_space.nii.gz",
     output:
         csv=f"{ANALYSIS_DIR}/{{subject}}/lesion_in_clusters_{{subject}}.csv",
