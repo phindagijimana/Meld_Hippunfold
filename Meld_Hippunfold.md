@@ -77,7 +77,7 @@ flowchart LR
     end
 
     subgraph work [Work directory — per run]
-        WD["work/ or work/cidur/<br/>meld_data | hippunfold | fused"]
+        WD["work/ or work/custom/<br/>meld_data | hippunfold | fused"]
     end
 
     CLI -->|start| SLURM
@@ -295,7 +295,7 @@ With T1 as the scalar map, `hypoperfused` / `frac_hypo` / `dice_hypo` index **st
 
 ## 6. Directory layout
 
-Example after `./meldhip start -i <bids> -w work/cidur -p sub-001 sub-002`:
+Example after `./meldhip start -i <bids> -w work/mycohort -p sub-001 sub-002`:
 
 ```
 Meld_Hippunfold/
@@ -307,7 +307,7 @@ Meld_Hippunfold/
 │   └── venv/                        Snakemake + analysis Python
 ├── config/config.yaml
 ├── slurm_meldhip.slurm
-└── work/cidur/
+└── work/mycohort/
     ├── meld_data/
     │   ├── from_bids/sub-001/ …     symlinks to BIDS
     │   ├── input/sub-001/ …         meld-docker staging
@@ -366,9 +366,9 @@ cp production.env.example production.env   # edit paths
 ./meldhip start -i /path/to/bids
 
 # Named subjects + separate work tree
-./meldhip start -i /path/to/CIDUR_BIDS/data_bids \
-  -w work/cidur \
-  -p sub-001 sub-002 sub-006 sub-007
+./meldhip start -i /path/to/bids \
+  -w work/mycohort \
+  -p sub-001 sub-002
 
 # Plan without submitting
 ./meldhip start -i /path/to/bids --dry-run

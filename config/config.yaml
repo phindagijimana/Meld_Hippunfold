@@ -22,6 +22,8 @@ bids_dir: ""
 subjects: []
 
 # --- pipeline options ---
+# MELD segmentation: false = T1w only (do not stage or use FLAIR)
+meld_use_flair: false
 hippunfold_modality: "T1w"
 hippunfold_output_spaces: "T1w"
 meld_extra_flags: ""
@@ -33,7 +35,7 @@ latency_wait: 60
 
 # Limit concurrent heavy container jobs (FreeSurfer / nnU-Net memory)
 resource_heavy_fs: 1
-resource_hippunfold: 2
+resource_hippunfold: 1
 
 # --- lesion analysis (ported from MELD_CBF; see USER_GUIDE.md) ---
 # Scalar map = MELD T1.mgz (already on prediction grid; no extra registration).

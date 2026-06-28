@@ -222,6 +222,42 @@ cmd_check() {
       n=$(find "${BIDS_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'sub-*' 2>/dev/null | wc -l)
       ok "[ok] last run BIDS_DIR=$BIDS_DIR ($n subjects)"
     fi
+    meld_data="${MELD_DATA_DIR:-$meld_data}"
+  fi
+
+  local manifest="${meld_data}/.meld_prepare_manifest.json"
+  if [[ -f "$manifest" ]]; then
+    local mode
+    mode="$(python3 -c "import json; print(json.load(open('$manifest')).get('modality_mode','?'))" 2>/dev/null || echo "?")"
+    if [[ "$mode" == *"T1w only"* ]]; then ok "[ok] MELD staging: $mode"
+    else warn "[warn] MELD staging: $mode (config meld_use_flair: false expects T1w only)"; fi
+  fi
+
+  local fs_root="${meld_data}/output/fs_outputs"
+  if [[ -d "$fs_root" ]]; then
+    local sub flair_n=0 t1only_n=0 pending=0
+    echo ""
+    info "MELD modality audit (fs_outputs):"
+    for sub_path in "$fs_root"/sub-*; do
+      [[ -d "$sub_path" ]] || continue
+      sub="$(basename "$sub_path")"
+      if [[ -f "${sub_path}/mri/FLAIR.mgz" ]]; then
+        warn "  $sub: ran with FLAIR (re-run needed for T1-only)"
+        flair_n=$((flair_n + 1))
+        pending=1
+      elif [[ -f "${sub_path}/mri/T1.mgz" ]]; then
+        ok "  $sub: T1-only FreeSurfer"
+        t1only_n=$((t1only_n + 1))
+      else
+        warn "  $sub: incomplete / missing T1.mgz"
+        pending=1
+      fi
+    done
+    if [[ "${flair_n:-0}" -gt 0 ]]; then
+      warn "[action] ${flair_n} subject(s) still have FLAIR-based MELD — run ./meldhip start to re-run meld_predict"
+    elif [[ "${pending:-0}" -eq 0 && "${t1only_n:-0}" -gt 0 ]]; then
+      ok "[ok] all completed MELD runs are T1-only"
+    fi
   fi
 
   echo ""
@@ -232,8 +268,8 @@ cmd_check() {
 write_run_config() {
   local bids="$1" work_dir="$2" subjects_str="$3" meld_flags="$4" hipp_flags="$5"
   local allow_missing_sif="${6:-0}" enable_analysis_viz="${7:-true}"
-  bids="$(cd "$bids" && pwd)"
-  work_dir="$(mkdir -p "$work_dir" && cd "$work_dir" && pwd)"
+  bids="$(realpath "$bids")"
+  work_dir="$(mkdir -p "$work_dir" && realpath "$work_dir")"
   local meld_sif hipp_sif
   if meld_sif="$(meld_sif_path 2>/dev/null)"; then :; else
     [[ "$allow_missing_sif" -eq 1 ]] || die "MELD SIF not found — ./meldhip install"
@@ -337,6 +373,7 @@ cmd_start() {
     "meld_extra_flags=${MELD_EXTRA_FLAGS}"
     "hippunfold_extra_flags=${HIPP_EXTRA_FLAGS}"
     "enable_analysis_viz=${enable_analysis_viz}"
+    "meld_use_flair=false"
     --reason
     --latency-wait "${SNAKEMAKE_LATENCY_WAIT:-60}"
   )

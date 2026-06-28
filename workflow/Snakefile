@@ -38,8 +38,9 @@ def _subjects() -> list[str]:
 
 MELD_DEPLOY = _abs(config["meld_deploy_root"])
 HIPP_ROOT = _abs(config["hippunfold_root"])
-MELD_DOCKER = str(Path(MELD_DEPLOY) / "meld-docker")
+RUN_MELD = str(Path(workflow.basedir) / "scripts/run_meld_subject.sh")
 RUN_HIPP = str(Path(HIPP_ROOT) / "run_hippunfold.sh")
+RESOLVE_HIPP = str(Path(workflow.basedir) / "scripts/resolve_hippunfold_subject_dir.py")
 
 MELD_DATA = _abs(config["meld_data_dir"])
 HIPP_OUT = _abs(config["hippunfold_out_dir"])
@@ -52,6 +53,7 @@ HIPP_EXTRA = config.get("hippunfold_extra_flags", "") or ""
 HIPP_MOD = config.get("hippunfold_modality", "T1w")
 HIPP_SPACES = config.get("hippunfold_output_spaces", "T1w")
 MELD_COHORT = config.get("meld_cohort", "from_bids")
+MELD_USE_FLAIR = _cfg_bool("meld_use_flair", False)
 HYPO_Z = config.get("hypo_z", -1.5)
 ENABLE_ANALYSIS_VIZ = _cfg_bool("enable_analysis_viz", True)
 
@@ -90,21 +92,21 @@ rule all:
 
 rule meld_prepare:
     output:
-        touch(f"{MELD_DATA}/.cohort_synced"),
+        manifest=f"{MELD_DATA}/.meld_prepare_manifest.json",
+    params:
+        use_flair=MELD_USE_FLAIR,
     shell:
         """
         export MELD_DEPLOY_ROOT={MELD_DEPLOY}
         export MELD_DATA_DIR={MELD_DATA}
+        export MELD_USE_FLAIR={params.use_flair}
         bash {workflow.basedir}/scripts/prepare_meld_from_bids.sh {MELD_DATA} {BIDS_DIR} {MELD_COHORT} "{SUBJECTS_FILTER}"
-        export MELD_DATA_DIR={MELD_DATA}
-        export MELD_DEPLOY_ROOT={MELD_DEPLOY}
-        bash {MELD_DOCKER} cohort sync
         """
 
 
 rule meld_predict:
     input:
-        sync=f"{MELD_DATA}/.cohort_synced",
+        manifest=f"{MELD_DATA}/.meld_prepare_manifest.json",
     output:
         pred=f"{MELD_DATA}/output/predictions_reports/{{subject}}/predictions/prediction.nii.gz",
         t1=f"{MELD_DATA}/output/fs_outputs/{{subject}}/mri/T1.mgz",
@@ -116,7 +118,9 @@ rule meld_predict:
         """
         export MELD_DATA_DIR={MELD_DATA}
         export MELD_DEPLOY_ROOT={MELD_DEPLOY}
-        bash {MELD_DOCKER} run {wildcards.subject} {MELD_EXTRA}
+        export BIDS_DIR={BIDS_DIR}
+        export MELD_USE_FLAIR={MELD_USE_FLAIR}
+        bash {RUN_MELD} {wildcards.subject} {MELD_EXTRA}
         test -f {output.pred}
         test -f {output.t1}
         test -f {output.aparc}
@@ -129,7 +133,7 @@ rule hippunfold_predict:
     params:
         label=lambda wc: wc.subject.replace("sub-", "", 1),
     resources:
-        hippunfold=int(config.get("resource_hippunfold", 2)),
+        hippunfold=int(config.get("resource_hippunfold", 1)),
     shell:
         """
         export HIPPUNFOLD_SIF="${{HIPPUNFOLD_SIF:?set HIPPUNFOLD_SIF}}"
@@ -143,7 +147,7 @@ rule hippunfold_predict:
             --modality {HIPP_MOD} \
             --output_spaces {HIPP_SPACES} \
             -p --cores {config[snakemake_cores]} {HIPP_EXTRA}
-        test -d {HIPP_OUT}/{wildcards.subject}/anat
+        PYTHONNOUSERSITE=1 python {RESOLVE_HIPP} {HIPP_OUT} {wildcards.subject} >/dev/null
         """
 
 
@@ -162,7 +166,7 @@ rule fuse_to_meld_space:
         PYTHONNOUSERSITE=1 python {params.script} \
             --subject {wildcards.subject} \
             --meld-prediction {input.meld} \
-            --hippunfold-subject-dir {HIPP_OUT}/{wildcards.subject} \
+            --hippunfold-out {HIPP_OUT} \
             --out-dir {params.out_dir}
         """
 
@@ -224,7 +228,7 @@ rule lesion_aggregate:
             subject=SUBJECTS,
         ),
     output:
-        f"{MELD_DATA}/output/cohort_lesion_stats.csv",
+        csv=f"{MELD_DATA}/output/cohort_lesion_stats.csv",
     params:
         asym=lambda w: config.get("asym_concordance_pct", -8.0),
         dice=lambda w: config.get("dice_concordance", 0.10),

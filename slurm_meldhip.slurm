@@ -27,6 +27,15 @@ if [[ -f "$ROOT/production.env" ]]; then
   set +a
 fi
 
+# Canonical paths for Apptainer binds (after production.env overrides).
+[[ -n "${BIDS_DIR:-}" && -d "${BIDS_DIR}" ]] && BIDS_DIR="$(realpath "$BIDS_DIR")"
+[[ -n "${WORK_DIR:-}" && -d "${WORK_DIR}" ]] && WORK_DIR="$(realpath "$WORK_DIR")"
+[[ -n "${MELD_DATA_DIR:-}" && -d "${MELD_DATA_DIR}" ]] && MELD_DATA_DIR="$(realpath "$MELD_DATA_DIR")"
+[[ -n "${HIPPUNFOLD_OUT_DIR:-}" && -d "${HIPPUNFOLD_OUT_DIR}" ]] && HIPPUNFOLD_OUT_DIR="$(realpath "$HIPPUNFOLD_OUT_DIR")"
+[[ -n "${FUSED_DIR:-}" && -d "${FUSED_DIR}" ]] && FUSED_DIR="$(realpath "$FUSED_DIR")"
+
+HIPP_RESOURCE="${HIPP_RESOURCE:-1}"
+
 export TMPDIR="${TMPDIR:-$HOME/apptainer_tmp}"
 mkdir -p "$TMPDIR" "$HIPPUNFOLD_CACHE_DIR" "$WORK_DIR"
 export APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-$TMPDIR}"
@@ -71,9 +80,10 @@ snakemake \
     "meld_extra_flags=${MELD_EXTRA_FLAGS:-}" \
     "hippunfold_extra_flags=${HIPP_EXTRA_FLAGS:-}" \
     "enable_analysis_viz=${ENABLE_ANALYSIS_VIZ:-true}" \
+    "meld_use_flair=false" \
     "snakemake_cores=${SLURM_CPUS_PER_TASK:-8}" \
   --cores "${SLURM_CPUS_PER_TASK:-8}" \
-  --resources heavy_fs=1 hippunfold=2 \
+  --resources heavy_fs=1 hippunfold="${HIPP_RESOURCE}" \
   --reason \
   --latency-wait "${SNAKEMAKE_LATENCY_WAIT:-60}" \
   --keep-going \

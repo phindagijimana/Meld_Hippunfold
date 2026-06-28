@@ -7,3 +7,7 @@ meldhip_*.err
 __pycache__/
 *.pyc
 .snakemake/
+
+# Local-only docs (cohort paths, lab share, subject results — do not publish)
+meldhippunfold.md
+meldhippunfold.docx

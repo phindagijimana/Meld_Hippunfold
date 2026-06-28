@@ -12,20 +12,29 @@ import nibabel as nib
 import numpy as np
 from nibabel.processing import resample_from_to
 
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from resolve_hippunfold_subject_dir import resolve_hippunfold_subject_dir
+
 
 def _find_subfield_segs(hipp_subject_dir: Path) -> list[Path]:
     anat = hipp_subject_dir / "anat"
     if not anat.is_dir():
         raise FileNotFoundError(f"HippUnfold anat dir missing: {anat}")
+    # HippUnfold v2+ uses e.g. *_desc-subfields_atlas-multihist7_dseg.nii.gz
     patterns = [
-        "*space-T1w*desc-subfields_dseg.nii.gz",
-        "*space-T1w*desc-subfields_dseg.nii",
-        "*space-cropT1w*desc-subfields_dseg.nii.gz",
-        "*desc-subfields_dseg.nii.gz",
+        "*hemi-*_space-T1w_desc-subfields*dseg.nii.gz",
+        "*hemi-*_space-T1w_desc-subfields*dseg.nii",
+        "*space-T1w*desc-subfields*dseg.nii.gz",
+        "*space-cropT1w*desc-subfields*dseg.nii.gz",
+        "*desc-subfields*dseg.nii.gz",
     ]
     found: list[Path] = []
     for pat in patterns:
         found.extend(sorted(anat.glob(pat)))
+        if found:
+            break
     # de-dupe while preserving order
     seen: set[Path] = set()
     unique: list[Path] = []
@@ -36,7 +45,7 @@ def _find_subfield_segs(hipp_subject_dir: Path) -> list[Path]:
     if not unique:
         raise FileNotFoundError(
             f"No HippUnfold subfield dseg under {anat} "
-            "(expected *space-T1w*desc-subfields_dseg.nii.gz; "
+            "(expected *space-T1w*desc-subfields*dseg.nii.gz; "
             "run HippUnfold with --output_spaces T1w)"
         )
     return unique
@@ -110,14 +119,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subject", required=True)
     parser.add_argument("--meld-prediction", type=Path, required=True)
-    parser.add_argument("--hippunfold-subject-dir", type=Path, required=True)
+    parser.add_argument(
+        "--hippunfold-out",
+        type=Path,
+        required=True,
+        help="HippUnfold BIDS-app output root (contains hippunfold/sub-*/ses-*/anat/)",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args()
 
     try:
+        hipp_dir = resolve_hippunfold_subject_dir(args.hippunfold_out, args.subject)
         fuse(
             args.meld_prediction,
-            args.hippunfold_subject_dir,
+            hipp_dir,
             args.out_dir,
             args.subject,
         )
